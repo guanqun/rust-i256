@@ -1,130 +1,121 @@
-#![allow(clippy::eq_op, clippy::from_over_into, clippy::identity_op)]
-#![no_std]
-use core::{
-    cmp::Ordering,
-    ops::{Div, Rem},
-};
+use core::cmp::Ordering;
 use ethnum::U256;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum Sign {
     Plus,
     Minus,
-    NoSign,
+    Zero,
 }
 
-const SIGN_BIT_MASK: U256 = U256::from_words(
-    0x7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_u128,
-    0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_u128,
+pub const SIGN_BIT_MASK: U256 = U256::from_words(
+    FLIPH_BITMASK_U128,
+    0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF,
 );
 
+pub const MIN_NEGATIVE_VALUE: U256 = U256::from_words(SIGN_BITMASK_U128, 0);
+
+const SIGN_BITMASK_U128: u128 = 0x8000_0000_0000_0000_0000_0000_0000_0000;
+const FLIPH_BITMASK_U128: u128 = 0x7FFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF;
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct I256(pub Sign, pub U256);
 
-impl I256 {
-    pub fn min_value() -> Self {
-        I256(Sign::Minus, (U256::MAX & SIGN_BIT_MASK) + U256::ONE)
-    }
-
-    pub fn zero() -> Self {
-        I256(Sign::NoSign, U256::ZERO)
-    }
-}
-
-impl Ord for I256 {
-    fn cmp(&self, other: &I256) -> Ordering {
-        match (self.0, other.0) {
-            (Sign::NoSign, Sign::NoSign) => Ordering::Equal,
-            (Sign::NoSign, Sign::Plus) => Ordering::Less,
-            (Sign::NoSign, Sign::Minus) => Ordering::Greater,
-            (Sign::Minus, Sign::NoSign) => Ordering::Less,
-            (Sign::Minus, Sign::Plus) => Ordering::Less,
-            (Sign::Minus, Sign::Minus) => self.1.cmp(&other.1).reverse(),
-            (Sign::Plus, Sign::Minus) => Ordering::Greater,
-            (Sign::Plus, Sign::NoSign) => Ordering::Greater,
-            (Sign::Plus, Sign::Plus) => self.1.cmp(&other.1),
-        }
-    }
-}
-
-impl PartialOrd for I256 {
-    fn partial_cmp(&self, other: &I256) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Default for I256 {
-    fn default() -> I256 {
-        I256::zero()
-    }
-}
-impl From<U256> for I256 {
-    fn from(val: U256) -> I256 {
-        if val == U256::ZERO {
-            I256::zero()
-        } else if val & SIGN_BIT_MASK == val {
-            I256(Sign::Plus, val)
+#[inline(always)]
+pub fn i256_sign<const DO_TWO_COMPL: bool>(val: &mut U256) -> Sign {
+    if val.high() & SIGN_BITMASK_U128 == 0 {
+        if *val == U256::ZERO {
+            Sign::Zero
         } else {
-            I256(Sign::Minus, !val + U256::ONE)
+            Sign::Plus
         }
-    }
-}
-impl Into<U256> for I256 {
-    fn into(self) -> U256 {
-        let sign = self.0;
-        if sign == Sign::NoSign {
-            U256::ZERO
-        } else if sign == Sign::Plus {
-            self.1
-        } else {
-            !self.1 + U256::from(1u64)
+    } else {
+        if DO_TWO_COMPL {
+            two_compl_mut(val);
         }
+        Sign::Minus
     }
 }
 
-impl Div for I256 {
-    type Output = I256;
+#[inline(always)]
+fn u256_remove_sign(val: &mut U256) {
+    *val.high_mut() &= FLIPH_BITMASK_U128;
+}
 
-    fn div(self, other: I256) -> I256 {
-        if other == I256::zero() {
-            return I256::zero();
-        }
+#[inline(always)]
+pub fn two_compl_mut(op: &mut U256) {
+    *op = two_compl(*op);
+}
 
-        if self == I256::min_value() && other.1 == U256::ONE {
-            return I256::min_value();
-        }
+pub fn two_compl(op: U256) -> U256 {
+    !op + U256::ONE
+}
 
-        let d = (self.1 / other.1) & SIGN_BIT_MASK;
-
-        if d == U256::ZERO {
-            return I256::zero();
-        }
-
-        match (self.0, other.0) {
-            (Sign::NoSign, Sign::Plus)
-            | (Sign::Plus, Sign::NoSign)
-            | (Sign::NoSign, Sign::NoSign)
-            | (Sign::Plus, Sign::Plus)
-            | (Sign::Minus, Sign::Minus) => I256(Sign::Plus, d),
-            (Sign::NoSign, Sign::Minus)
-            | (Sign::Plus, Sign::Minus)
-            | (Sign::Minus, Sign::NoSign)
-            | (Sign::Minus, Sign::Plus) => I256(Sign::Minus, d),
-        }
+#[inline(always)]
+pub fn i256_cmp(mut first: U256, mut second: U256) -> Ordering {
+    let first_sign = i256_sign::<false>(&mut first);
+    let second_sign = i256_sign::<false>(&mut second);
+    match (first_sign, second_sign) {
+        (Sign::Zero, Sign::Zero) => Ordering::Equal,
+        (Sign::Zero, Sign::Plus) => Ordering::Less,
+        (Sign::Zero, Sign::Minus) => Ordering::Greater,
+        (Sign::Minus, Sign::Zero) => Ordering::Less,
+        (Sign::Minus, Sign::Plus) => Ordering::Less,
+        (Sign::Minus, Sign::Minus) => first.cmp(&second),
+        (Sign::Plus, Sign::Minus) => Ordering::Greater,
+        (Sign::Plus, Sign::Zero) => Ordering::Greater,
+        (Sign::Plus, Sign::Plus) => first.cmp(&second),
     }
 }
 
-impl Rem for I256 {
-    type Output = I256;
+#[inline(always)]
+pub fn i256_div(mut first: U256, mut second: U256) -> U256 {
+    let second_sign = i256_sign::<true>(&mut second);
+    if second_sign == Sign::Zero {
+        return U256::ZERO;
+    }
+    let first_sign = i256_sign::<true>(&mut first);
+    if first_sign == Sign::Minus && first == MIN_NEGATIVE_VALUE && second == U256::ONE {
+        return two_compl(MIN_NEGATIVE_VALUE);
+    }
 
-    fn rem(self, other: I256) -> I256 {
-        let r = (self.1 % other.1) & SIGN_BIT_MASK;
+    let mut d = first / second;
 
-        if r == U256::ZERO {
-            return I256::zero();
-        }
+    u256_remove_sign(&mut d);
 
-        I256(self.0, r)
+    if d == U256::ZERO {
+        return U256::ZERO;
+    }
+
+    match (first_sign, second_sign) {
+        (Sign::Zero, Sign::Plus)
+        | (Sign::Plus, Sign::Zero)
+        | (Sign::Zero, Sign::Zero)
+        | (Sign::Plus, Sign::Plus)
+        | (Sign::Minus, Sign::Minus) => d,
+        (Sign::Zero, Sign::Minus)
+        | (Sign::Plus, Sign::Minus)
+        | (Sign::Minus, Sign::Zero)
+        | (Sign::Minus, Sign::Plus) => two_compl(d),
+    }
+}
+
+#[inline(always)]
+pub fn i256_mod(mut first: U256, mut second: U256) -> U256 {
+    let first_sign = i256_sign::<true>(&mut first);
+    if first_sign == Sign::Zero {
+        return U256::ZERO;
+    }
+
+    let _ = i256_sign::<true>(&mut second);
+    let mut r = first % second;
+    u256_remove_sign(&mut r);
+    if r == U256::ZERO {
+        return U256::ZERO;
+    }
+    if first_sign == Sign::Minus {
+        two_compl(r)
+    } else {
+        r
     }
 }
 
@@ -132,35 +123,29 @@ impl Rem for I256 {
 mod tests {
     use super::*;
     use core::num::Wrapping;
+    use ethnum::*;
 
     #[test]
     fn div_i256() {
-        // Sanity checks based on i8. Notice that we need to use `Wrapping` here because
-        // Rust will prevent the overflow by default whereas the EVM does not.
         assert_eq!(Wrapping(i8::MIN) / Wrapping(-1), Wrapping(i8::MIN));
-        assert_eq!(i8::MIN / 1, i8::MIN);
-        assert_eq!(i8::MAX / 1, i8::MAX);
         assert_eq!(i8::MAX / -1, -i8::MAX);
 
-        assert_eq!(100i8 / -1, -100i8);
-        assert_eq!(100i8 / 2, 50i8);
+        let one = 1.as_u256();
+        let one_hundred = 100.as_u256();
+        let fifty = 50.as_u256();
+        let _fifty_sign = Sign::Plus;
+        let two = 2.as_u256();
+        let neg_one_hundred = 100.as_u256();
+        let _neg_one_hundred_sign = Sign::Minus;
+        let minus_one = 1.as_u256();
+        let max_value = 2.as_u256().pow(255) - 1;
+        let neg_max_value = 2.as_u256().pow(255) - 1;
 
-        // Now the same calculations based on i256
-        let one = I256(Sign::NoSign, U256::new(1));
-        let one_hundred = I256(Sign::NoSign, U256::new(100));
-        let fifty = I256(Sign::Plus, U256::new(50));
-        let two = I256(Sign::NoSign, U256::new(2));
-        let neg_one_hundred = I256(Sign::Minus, U256::new(100));
-        let minus_one = I256(Sign::Minus, U256::new(1));
-        let max_value = I256(Sign::Plus, U256::new(2).pow(255) - 1);
-        let neg_max_value = I256(Sign::Minus, U256::new(2).pow(255) - 1);
-
-        assert_eq!(I256::min_value() / minus_one, I256::min_value());
-        assert_eq!(I256::min_value() / one, I256::min_value());
-        assert_eq!(max_value / one, max_value);
-        assert_eq!(max_value / minus_one, neg_max_value);
-
-        assert_eq!(one_hundred / minus_one, neg_one_hundred);
-        assert_eq!(one_hundred / two, fifty);
+        assert_eq!(i256_div(MIN_NEGATIVE_VALUE, minus_one), MIN_NEGATIVE_VALUE);
+        assert_eq!(i256_div(MIN_NEGATIVE_VALUE, one), MIN_NEGATIVE_VALUE);
+        assert_eq!(i256_div(max_value, one), max_value);
+        assert_eq!(i256_div(max_value, minus_one), neg_max_value);
+        assert_eq!(i256_div(one_hundred, minus_one), neg_one_hundred);
+        assert_eq!(i256_div(one_hundred, two), fifty);
     }
 }
